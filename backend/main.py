@@ -32,6 +32,17 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Database
 def init_db():
+    # Migration: Add updated_at column if it doesn't exist
+    try:
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(posts)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if 'updated_at' not in columns:
+            print("Migrating: Adding updated_at column to posts table...")
+            cursor.execute("ALTER TABLE posts ADD COLUMN updated_at TIMESTAMP")
+            conn.commit()
+    except Exception as e:
+        print(f"Migration error: {e}")
     conn = sqlite3.connect("blog.db")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -51,6 +62,7 @@ def init_db():
             images TEXT,
             author_id INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (author_id) REFERENCES users (id)
         )
     """)
@@ -115,6 +127,10 @@ init_db()
 
 # Models
 class PostCreate(BaseModel):
+    title: str
+    content: str
+
+class PostUpdate(BaseModel):
     title: str
     content: str
 
@@ -261,11 +277,12 @@ async def get_posts(user: dict = Depends(get_optional_user)):
             "title": post[1],
             "content": post[2],
             "images": json.loads(post[3]) if post[3] else [],
-            "author": {"username": post[5], "avatar": post[6]},
+            "author": {"username": post[6], "avatar": post[7]},
             "created_at": post[4],
-            "likes": post[7],
-            "dislikes": post[8],
-            "comment_count": post[9]
+            "updated_at": post[5],
+            "likes": post[8],
+            "dislikes": post[9],
+            "comment_count": post[10]
         } for post in posts]
         
     except Exception as e:
@@ -318,6 +335,149 @@ async def create_post(
     except Exception as e:
         print(f"Error creating post: {e}")
         raise HTTPException(status_code=500, detail="Failed to create post")
+
+@app.put("/posts/{post_id}")
+async def update_post(
+    post_id: int,
+    title: str = Form(...),
+    content: str = Form(...),
+    existing_images: str = Form(default="[]"),
+    new_images: List[UploadFile] = File(default=[]),
+    user: dict = Depends(get_current_user)
+):
+    try:
+        print(f"Updating post {post_id} by user: {user}")  # Debug log
+        
+        if not user["is_admin"]:
+            raise HTTPException(status_code=403, detail="Admin access required")
+        
+        conn = sqlite3.connect("blog.db")
+        cursor = conn.cursor()
+        
+        # Check if post exists and user has permission
+        cursor.execute("SELECT author_id FROM posts WHERE id = ?", (post_id,))
+        post = cursor.fetchone()
+        if not post:
+            conn.close()
+            raise HTTPException(status_code=404, detail="Post not found")
+        
+        # Parse existing images
+        try:
+            existing_image_list = json.loads(existing_images)
+        except:
+            existing_image_list = []
+        
+        # Save new images
+        new_image_paths = []
+        for img in new_images:
+            if img.filename:
+                ext = img.filename.split(".")[-1].lower()
+                if ext not in ['jpg', 'jpeg', 'png', 'gif', 'webp']:
+                    continue
+                    
+                filename = f"{secrets.token_hex(16)}.{ext}"
+                file_path = f"static/{filename}"
+                
+                with open(file_path, "wb") as f:
+                    content_bytes = await img.read()
+                    f.write(content_bytes)
+                new_image_paths.append(f"/static/{filename}")
+        
+        # Combine existing and new images
+        all_images = existing_image_list + new_image_paths
+        
+        # Update the post
+        cursor.execute("""
+            UPDATE posts 
+            SET title = ?, content = ?, images = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (title, content, json.dumps(all_images), post_id))
+        
+        conn.commit()
+        
+        # Get updated post data
+        cursor.execute("""
+            SELECT p.*, u.username, u.avatar
+            FROM posts p
+            JOIN users u ON p.author_id = u.id
+            WHERE p.id = ?
+        """, (post_id,))
+        updated_post = cursor.fetchone()
+        
+        conn.close()
+        
+        if updated_post:
+            result = {
+                "id": updated_post[0],
+                "title": updated_post[1],
+                "content": updated_post[2],
+                "images": json.loads(updated_post[3]) if updated_post[3] else [],
+                "author": {"username": updated_post[6], "avatar": updated_post[7]},
+                "created_at": updated_post[4],
+                "updated_at": updated_post[5]
+            }
+            
+            print(f"Post updated successfully: {title}")  # Debug log
+            return result
+        else:
+            raise HTTPException(status_code=500, detail="Failed to retrieve updated post")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error updating post: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update post")
+
+@app.delete("/posts/{post_id}")
+async def delete_post(
+    post_id: int,
+    user: dict = Depends(get_current_user)
+):
+    try:
+        print(f"Deleting post {post_id} by user: {user}")  # Debug log
+        
+        if not user["is_admin"]:
+            raise HTTPException(status_code=403, detail="Admin access required")
+        
+        conn = sqlite3.connect("blog.db")
+        cursor = conn.cursor()
+        
+        # Check if post exists
+        cursor.execute("SELECT images FROM posts WHERE id = ?", (post_id,))
+        post = cursor.fetchone()
+        if not post:
+            conn.close()
+            raise HTTPException(status_code=404, detail="Post not found")
+        
+        # Delete associated images from filesystem
+        try:
+            images = json.loads(post[0]) if post[0] else []
+            for img_path in images:
+                if img_path.startswith("/static/"):
+                    file_path = img_path[1:]  # Remove leading slash
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+        except Exception as e:
+            print(f"Error deleting images: {e}")
+        
+        # Delete related records first (comments, interactions)
+        cursor.execute("DELETE FROM comments WHERE post_id = ?", (post_id,))
+        cursor.execute("DELETE FROM interactions WHERE post_id = ?", (post_id,))
+        
+        # Delete the post
+        cursor.execute("DELETE FROM posts WHERE id = ?", (post_id,))
+        
+        conn.commit()
+        conn.close()
+        
+        print(f"Post {post_id} deleted successfully")  # Debug log
+        return {"message": "Post deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error deleting post: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete post")
 
 # Comments
 @app.get("/posts/{post_id}/comments")
