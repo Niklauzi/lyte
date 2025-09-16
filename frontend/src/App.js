@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { MessageCircle, Heart, ThumbsDown, Share2, Upload, PlusCircle, TrendingUp, Brain, Clock, X, Expand, Edit2, Trash2, Save, XCircle } from 'lucide-react';
+import { MessageCircle, Heart, ThumbsDown, Share2, Upload, X, Expand, Edit2, Trash2, Save, XCircle } from 'lucide-react';
 import 'bootstrap/dist/css/bootstrap.min.css';
 
 const API_URL = 'http://localhost:8000';
@@ -7,29 +7,139 @@ const API_URL = 'http://localhost:8000';
 // Auth context
 const AuthContext = React.createContext();
 
+function LoginModal({ isOpen, onClose }) {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const { loginAdmin } = React.useContext(AuthContext);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+    
+    try {
+      await loginAdmin(username, password);
+      onClose();
+    } catch (error) {
+      setError('Invalid credentials');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div 
+      className="position-fixed top-0 start-0 w-100 h-100 d-flex align-items-center justify-content-center"
+      style={{
+        backgroundColor: 'rgba(0, 0, 0, 0.5)',
+        zIndex: 1050
+      }}
+      onClick={onClose}
+    >
+      <div 
+        className="bg-white rounded shadow-lg p-4"
+        style={{ width: '100%', maxWidth: '400px' }}
+        onClick={e => e.stopPropagation()}
+      >
+        <h4 className="mb-4">Admin Login</h4>
+        
+        {error && (
+          <div className="alert alert-danger">{error}</div>
+        )}
+        
+        <form onSubmit={handleSubmit}>
+          <div className="mb-3">
+            <label className="form-label">Username</label>
+            <input
+              type="text"
+              className="form-control"
+              value={username}
+              onChange={e => setUsername(e.target.value)}
+              required
+            />
+          </div>
+          
+          <div className="mb-4">
+            <label className="form-label">Password</label>
+            <input
+              type="password"
+              className="form-control"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              required
+            />
+          </div>
+          
+          <div className="d-grid">
+            <button
+              type="submit"
+              className="btn btn-primary"
+              disabled={loading}
+            >
+              {loading ? 'Logging in...' : 'Login'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [token, setToken] = useState(null);
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
 
   useEffect(() => {
-    // Check for token in memory first, then localStorage as fallback for demo
+    // Try to get saved token and user
     const savedToken = localStorage.getItem('token');
-    if (savedToken) {
+    const savedUser = localStorage.getItem('user');
+    
+    if (savedToken && savedUser) {
       setToken(savedToken);
-      // In real app, verify token with backend
-      const savedUser = localStorage.getItem('user');
-      if (savedUser) {
-        setUser(JSON.parse(savedUser));
-      }
+      setUser(JSON.parse(savedUser));
+    } else {
+      // Create anonymous user
+      createAnonymousUser();
     }
   }, []);
 
-  const login = async (twitterData) => {
-  try {
-    const response = await fetch(`${API_URL}/auth/twitter`, {
+  const createAnonymousUser = async () => {
+    try {
+      // Generate a unique device ID (in real app, use more robust method)
+      let deviceId = localStorage.getItem('deviceId');
+      if (!deviceId) {
+        deviceId = 'anon_' + Math.random().toString(36).substr(2, 9);
+        localStorage.setItem('deviceId', deviceId);
+      }
+
+      const response = await fetch(`${API_URL}/auth/anonymous`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_id: deviceId })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setToken(data.token);
+        setUser(data.user);
+        localStorage.setItem('token', data.token);
+        localStorage.setItem('user', JSON.stringify(data.user));
+      }
+    } catch (error) {
+      console.error('Error creating anonymous user:', error);
+    }
+  };
+
+  const loginAdmin = async (username, password) => {
+    const response = await fetch(`${API_URL}/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(twitterData)
+      body: JSON.stringify({ username, password })
     });
 
     if (!response.ok) {
@@ -41,21 +151,22 @@ function AuthProvider({ children }) {
     setUser(data.user);
     localStorage.setItem('token', data.token);
     localStorage.setItem('user', JSON.stringify(data.user));
-  } catch (error) {
-    console.error('Login error:', error);
-  }
-};
+  };
 
   const logout = () => {
     localStorage.removeItem('token');
     localStorage.removeItem('user');
     setToken(null);
-    setUser(null);
+    createAnonymousUser(); // Create new anonymous user after logout
   };
 
+  const openLoginModal = () => setIsLoginModalOpen(true);
+  const closeLoginModal = () => setIsLoginModalOpen(false);
+
   return (
-    <AuthContext.Provider value={{ user, login, logout, token }}>
+    <AuthContext.Provider value={{ user, loginAdmin, logout, token, openLoginModal }}>
       {children}
+      <LoginModal isOpen={isLoginModalOpen} onClose={closeLoginModal} />
     </AuthContext.Provider>
   );
 }
@@ -113,7 +224,17 @@ function ImageModal({ src, alt, isOpen, onClose }) {
 }
 
 // Post Detail Modal Component
-function PostDetailModal({ post, isOpen, onClose, onInteract, onComment, onPostUpdate, onPostDelete }) {
+function PostDetailModal({ 
+  post, 
+  isOpen, 
+  onClose, 
+  onInteract, 
+  onComment, 
+  onPostUpdate, 
+  onPostDelete,
+  setPosts,
+  setSelectedPost
+}) {
   const { user, token } = React.useContext(AuthContext);
   const [comments, setComments] = useState([]);
   const [newComment, setNewComment] = useState('');
@@ -165,13 +286,22 @@ function PostDetailModal({ post, isOpen, onClose, onInteract, onComment, onPostU
       });
       
       if (res.ok) {
+        const newCommentData = await res.json();
+        setComments(prev => [...prev, newCommentData]);
         setNewComment('');
-        loadComments();
-        onComment();
+        if (onComment) onComment(); // Update parent component
+        // Update the post's comment count in the posts list
+        setPosts((prevPosts) => 
+          prevPosts.map(p => 
+            p.id === post.id 
+              ? { ...p, comment_count: (p.comment_count || 0) + 1 }
+              : p
+          )
+        );
       }
     } catch (error) {
       console.error('Error posting comment:', error);
-      setNewComment('');
+      alert('Failed to post comment. Please try again.');
     }
   };
 
@@ -193,7 +323,10 @@ function PostDetailModal({ post, isOpen, onClose, onInteract, onComment, onPostU
   };
 
   const handleSaveEdit = async () => {
-    if (!editTitle.trim() || !editContent.trim()) return;
+    if (!editTitle.trim() || !editContent.trim()) {
+      alert('Title and content are required');
+      return;
+    }
     setLoading(true);
     try {
       const formData = new FormData();
@@ -202,14 +335,23 @@ function PostDetailModal({ post, isOpen, onClose, onInteract, onComment, onPostU
       formData.append('existing_images', JSON.stringify(editImages));
       // Add new images
       newImages.forEach(img => formData.append('new_images', img));
+      
       const res = await fetch(`${API_URL}/posts/${post.id}`, {
         method: 'PUT',
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { 
+          'Authorization': `Bearer ${token}`,
+        },
         body: formData
       });
+      
       if (res.ok) {
-    if (onPostUpdate) onPostUpdate();
-    onClose();
+        const updatedPost = await res.json();
+        // Update both the posts list and selected post
+        setPosts((prevPosts) => prevPosts.map(p => p.id === updatedPost.id ? updatedPost : p));
+        setSelectedPost(updatedPost);
+        if (onPostUpdate) onPostUpdate();
+        setIsEditing(false);
+        alert('Post updated successfully!');
       } else {
         throw new Error('Failed to update post');
       }
@@ -306,10 +448,18 @@ function PostDetailModal({ post, isOpen, onClose, onInteract, onComment, onPostU
                 <div>
                   <h6 className="mb-0 fw-semibold">{post.author.username}</h6>
                   <div>
-                    <small className="text-muted">{new Date(post.created_at).toLocaleDateString()}</small>
-                    {post.updated_at && post.updated_at !== post.created_at && (
-                      <small className="text-muted"> • (edited {new Date(post.updated_at).toLocaleDateString()})</small>
-                    )}
+                                      <small className="text-muted">
+                                        {new Date(post.created_at).toLocaleString(undefined, { 
+                                          dateStyle: 'short',
+                                          timeStyle: 'medium'
+                                        })}
+                                      </small>
+                  {post.updated_at && post.updated_at !== post.created_at && (
+                    <small className="text-muted"> • (edited {new Date(post.updated_at).toLocaleString(undefined, { 
+                      dateStyle: 'short',
+                      timeStyle: 'medium'
+                    })})</small>
+                  )}
                   </div>
                 </div>
               </div>
@@ -583,7 +733,12 @@ function PostDetailModal({ post, isOpen, onClose, onInteract, onComment, onPostU
                       <div className="flex-grow-1">
                         <div className="d-flex align-items-center gap-2 mb-1">
                           <small className="fw-semibold">{comment.user.username}</small>
-                          <small className="text-muted">{new Date(comment.created_at).toLocaleDateString()}</small>
+                          <small className="text-muted">
+                            {new Date(comment.created_at).toLocaleString(undefined, { 
+                              dateStyle: 'short',
+                              timeStyle: 'medium'
+                            })}
+                          </small>
                         </div>
                         <p className="mb-0">{comment.content}</p>
                       </div>
@@ -610,57 +765,6 @@ function PostDetailModal({ post, isOpen, onClose, onInteract, onComment, onPostU
   );
 }
 
-// Login component
-function TwitterLogin() {
-  const { login } = React.useContext(AuthContext);
-  
-  const handleLogin = async (isAdmin = false) => {
-    const mockData = {
-      twitter_id: isAdmin ? `admin_${Math.floor(Math.random() * 3) + 1}` : `user_${Date.now()}`,
-      username: isAdmin ? 'Admin User' : 'Demo User',
-      avatar: '',
-      is_admin: isAdmin
-    };
-    
-    console.log('Logging in with:', mockData);
-    await login(mockData);
-  };
-
-  return (
-    <div className="min-vh-100 d-flex align-items-center justify-content-center" style={{background: 'linear-gradient(135deg, #f8f9ff 0%, #e3e7ff 100%)'}}>
-      <div className="card shadow-lg" style={{maxWidth: '400px', width: '100%'}}>
-        <div className="card-body p-5">
-          <div className="text-center mb-4">
-            <h1 className="h2 fw-bold text-dark mb-3">Blog Platform</h1>
-            <p className="text-muted">Connect with Twitter to continue</p>
-          </div>
-          
-          <div className="d-grid gap-3">
-            <button
-              onClick={() => handleLogin(false)}
-              className="btn btn-primary btn-lg d-flex align-items-center justify-content-center gap-2"
-            >
-              <MessageCircle size={20} />
-              Login as Reader
-            </button>
-            
-            <button
-              onClick={() => handleLogin(true)}
-              className="btn btn-success btn-lg d-flex align-items-center justify-content-center gap-2"
-            >
-              <PlusCircle size={20} />
-              Login as Admin
-            </button>
-          </div>
-          
-          <p className="text-muted text-center mt-4 small">
-            Demo app - no real Twitter auth required
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 // Post card component
 function PostCard({ post, onInteract, onComment, onPostClick, onPostDelete }) {
@@ -668,7 +772,6 @@ function PostCard({ post, onInteract, onComment, onPostClick, onPostDelete }) {
   const [showComments, setShowComments] = useState(false);
   const [comments, setComments] = useState([]);
   const [newComment, setNewComment] = useState('');
-  const [prediction, setPrediction] = useState(null);
   const [selectedImage, setSelectedImage] = useState(null);
   const [isExpanded, setIsExpanded] = useState(false);
 
@@ -690,26 +793,7 @@ function PostCard({ post, onInteract, onComment, onPostClick, onPostDelete }) {
     }
   };
 
-  const loadPrediction = async () => {
-    try {
-      const res = await fetch(`${API_URL}/predict/engagement/${post.id}`);
-      if (res.ok) {
-        const data = await res.json();
-        setPrediction(data);
-      }
-    } catch (error) {
-      console.error('Error loading prediction:', error);
-      setPrediction({
-        engagement_score: Math.floor(Math.random() * 100),
-        predictions: [
-          "This post will likely get 5-10 more interactions",
-          "Peak engagement expected in 3 hours",
-          "Viral probability: 78%"
-        ],
-        confidence: "74.2%"
-      });
-    }
-  };
+
 
   const handleComment = async (e) => {
     e.preventDefault();
@@ -738,7 +822,6 @@ function PostCard({ post, onInteract, onComment, onPostClick, onPostDelete }) {
   const handleInteract = async (action) => {
     if (!token) return;
     await onInteract(post.id, action);
-    if (action === 'like') loadPrediction();
   };
 
   const handlePostClick = (e) => {
@@ -783,7 +866,12 @@ function PostCard({ post, onInteract, onComment, onPostClick, onPostDelete }) {
               <div>
                 <h6 className="mb-0 fw-semibold">{post.author.username}</h6>
                 <div>
-                  <small className="text-muted">{new Date(post.created_at).toLocaleDateString()}</small>
+                  <small className="text-muted">
+                    {new Date(post.created_at).toLocaleString(undefined, { 
+                      dateStyle: 'short',
+                      timeStyle: 'medium'
+                    })}
+                  </small>
                   {post.updated_at && post.updated_at !== post.created_at && (
                     <small className="text-muted"> • (edited)</small>
                   )}
@@ -946,34 +1034,8 @@ function PostCard({ post, onInteract, onComment, onPostClick, onPostDelete }) {
                 </button>
               </div>
               
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  loadPrediction();
-                }}
-                className="btn btn-outline-secondary btn-sm d-flex align-items-center gap-2 no-click"
-              >
-                <Brain size={16} />
-                AI Predict
-              </button>
             </div>
           </div>
-          
-          {prediction && (
-            <div className="alert alert-info mt-3" style={{background: 'linear-gradient(45deg, #f8f4ff, #fdf2f8)', border: '1px solid #e0e7ff'}}>
-              <div className="d-flex align-items-center gap-2 mb-2">
-                <TrendingUp size={16} className="text-primary" />
-                <strong className="text-primary">AI Prediction</strong>
-                <small className="text-muted">({prediction.confidence})</small>
-              </div>
-              <div className="small">
-                <p className="mb-1"><strong>Engagement Score:</strong> {prediction.engagement_score}/100</p>
-                {prediction.predictions.map((pred, idx) => (
-                  <p key={idx} className="mb-1">• {pred}</p>
-                ))}
-              </div>
-            </div>
-          )}
           
           {showComments && (
             <div className="border-top mt-3 pt-3">
@@ -1017,7 +1079,12 @@ function PostCard({ post, onInteract, onComment, onPostClick, onPostDelete }) {
                     <div className="flex-grow-1">
                       <div className="d-flex align-items-center gap-2 mb-1">
                         <small className="fw-semibold">{comment.user.username}</small>
-                        <small className="text-muted">{new Date(comment.created_at).toLocaleDateString()}</small>
+                        <small className="text-muted">
+                          {new Date(comment.created_at).toLocaleString(undefined, { 
+                            dateStyle: 'short',
+                            timeStyle: 'medium'
+                          })}
+                        </small>
                       </div>
                       <p className="mb-0">{comment.content}</p>
                     </div>
@@ -1171,76 +1238,9 @@ function CreatePostForm({ onPostCreated }) {
   );
 }
 
-// AI Insights Panel
-function AIInsights() {
-  const [insights, setInsights] = useState(null);
-
-  useEffect(() => {
-    const loadInsights = async () => {
-      try {
-        const res = await fetch(`${API_URL}/predict/trending`);
-        if (res.ok) {
-          const data = await res.json();
-          setInsights(data);
-        }
-      } catch (error) {
-        console.error('Error loading insights:', error);
-        setInsights({
-          trending_topics: ['React', 'FastAPI', 'AI'],
-          next_viral_post: 'Posts about Python are 67% more likely to go viral',
-          best_time_to_post: '14:00 - 18:00'
-        });
-      }
-    };
-    loadInsights();
-  }, []);
-
-  if (!insights) {
-    return (
-      <div className="card text-white mb-4" style={{background: 'linear-gradient(45deg, #8b5cf6, #ec4899)'}}>
-        <div className="card-body text-center">
-          <div className="spinner-border text-white" role="status">
-            <span className="visually-hidden">Loading...</span>
-          </div>
-          <p className="mt-2 mb-0">Loading AI insights...</p>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="card text-white mb-4" style={{background: 'linear-gradient(45deg, #8b5cf6, #ec4899)'}}>
-      <div className="card-body">
-        <div className="d-flex align-items-center gap-2 mb-3">
-          <Brain size={24} />
-          <h2 className="h5 mb-0 fw-bold">AI Insights</h2>
-        </div>
-        
-        <div className="vstack gap-3">
-          <div>
-            <h6 className="fw-semibold mb-1">🔥 Trending Topics</h6>
-            <p className="mb-0 opacity-75">{insights.trending_topics.join(', ')}</p>
-          </div>
-          
-          <div>
-            <h6 className="fw-semibold mb-1">📈 Viral Prediction</h6>
-            <p className="mb-0 opacity-75">{insights.next_viral_post}</p>
-          </div>
-          
-          <div className="d-flex align-items-center gap-2">
-            <Clock size={16} />
-            <span className="fw-semibold">Best Time to Post:</span>
-            <span className="opacity-75">{insights.best_time_to_post}</span>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // Main app
 function BlogApp() {
-  const { user, logout, token } = React.useContext(AuthContext);
+  const { user, logout, token, openLoginModal } = React.useContext(AuthContext);
   const [posts, setPosts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedPost, setSelectedPost] = useState(null);
@@ -1279,16 +1279,55 @@ function BlogApp() {
 
   const handleInteract = async (postId, action) => {
     try {
+      // Optimistically update UI state
+      setPosts((prevPosts) => 
+        prevPosts.map(p => {
+          if (p.id === postId) {
+            const wasLiked = p.user_liked;
+            const wasDisliked = p.user_disliked;
+            return {
+              ...p,
+              user_liked: action === 'like' ? !wasLiked : false,
+              user_disliked: action === 'dislike' ? !wasDisliked : false,
+              likes: action === 'like' ? p.likes + (wasLiked ? -1 : 1) : p.likes - (wasLiked ? 1 : 0),
+              dislikes: action === 'dislike' ? p.dislikes + (wasDisliked ? -1 : 1) : p.dislikes - (wasDisliked ? 1 : 0)
+            };
+          }
+          return p;
+        })
+      );
+
+      if (selectedPost?.id === postId) {
+        setSelectedPost(prev => ({
+          ...prev,
+          user_liked: action === 'like' ? !prev.user_liked : false,
+          user_disliked: action === 'dislike' ? !prev.user_disliked : false,
+          likes: action === 'like' ? prev.likes + (prev.user_liked ? -1 : 1) : prev.likes - (prev.user_liked ? 1 : 0),
+          dislikes: action === 'dislike' ? prev.dislikes + (prev.user_disliked ? -1 : 1) : prev.dislikes - (prev.user_disliked ? 1 : 0)
+        }));
+      }
+
+      // Send request to server
       const res = await fetch(`${API_URL}/posts/${postId}/${action}`, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
       });
-      if (res.ok) {
-        const updatedPost = await res.json();
-        setPosts((prevPosts) => prevPosts.map(p => p.id === updatedPost.id ? updatedPost : p));
+      
+      if (!res.ok) {
+        // If request fails, revert the optimistic update
+        await loadPosts();
+        if (selectedPost?.id === postId) {
+          const freshData = await fetch(`${API_URL}/posts/${postId}`).then(r => r.json());
+          setSelectedPost(freshData);
+        }
       }
     } catch (error) {
       console.error('Error with interaction:', error);
+      // On error, reload posts to ensure correct state
+      await loadPosts();
     }
   };
 
@@ -1320,16 +1359,27 @@ function BlogApp() {
           <div className="container">
             <span className="navbar-brand h2 fw-bold mb-0">Blog Platform</span>
             <div className="d-flex align-items-center gap-3">
-              <span className="text-muted">
-                Welcome, {user?.username} 
-                {user?.is_admin && <span className="badge bg-success ms-2">Admin</span>}
-              </span>
-              <button
-                onClick={logout}
-                className="btn btn-outline-danger btn-sm"
-              >
-                Logout
-              </button>
+              {user?.is_admin ? (
+                <>
+                  <span className="text-muted">
+                    Welcome, {user.username}
+                    <span className="badge bg-success ms-2">Admin</span>
+                  </span>
+                  <button
+                    onClick={logout}
+                    className="btn btn-outline-danger btn-sm"
+                  >
+                    Logout
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={openLoginModal}
+                  className="btn btn-outline-primary btn-sm"
+                >
+                  Admin Login
+                </button>
+              )}
             </div>
           </div>
         </nav>
@@ -1337,8 +1387,6 @@ function BlogApp() {
         <div className="container py-4">
           <div className="row justify-content-center">
             <div className="col-lg-8">
-              <AIInsights />
-              
               {user?.is_admin && (
                 <>
                   <div className="alert alert-success mb-4">
@@ -1391,6 +1439,8 @@ function BlogApp() {
         onComment={loadPosts}
         onPostUpdate={loadPosts}
         onPostDelete={loadPosts}
+        setPosts={setPosts}
+        setSelectedPost={setSelectedPost}
       />
     </>
   );
@@ -1400,17 +1450,9 @@ function BlogApp() {
 export default function App() {
   return (
     <AuthProvider>
-      <AppContent />
+      <div className="App">
+        <BlogApp />
+      </div>
     </AuthProvider>
-  );
-}
-
-function AppContent() {
-  const { user } = React.useContext(AuthContext);
-  
-  return (
-    <div className="App">
-      {!user ? <TwitterLogin /> : <BlogApp />}
-    </div>
   );
 }

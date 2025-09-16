@@ -13,7 +13,9 @@ from typing import Optional, List
 import httpx
 import os
 from pydantic import BaseModel
+from dotenv import load_dotenv
 
+load_dotenv()
 app = FastAPI()
 security = HTTPBearer()
 
@@ -46,16 +48,39 @@ def init_db():
     except Exception as e:
         print(f"Migration error: {e}")
     
+    # Migration: Add avatar column if it doesn't exist
+    try:
+        cursor.execute("PRAGMA table_info(users)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if 'avatar' not in columns:
+            print("Migrating: Adding avatar column to users table...")
+            cursor.execute("ALTER TABLE users ADD COLUMN avatar TEXT DEFAULT ''")
+            conn.commit()
+    except Exception as e:
+        print(f"Migration error (avatar): {e}")
+
+    # Drop old users table if it exists (one-time migration)
+    # conn.execute("DROP TABLE IF EXISTS users")
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY,
-            twitter_id TEXT UNIQUE,
-            username TEXT,
-            avatar TEXT,
+            username TEXT UNIQUE,
+            password_hash TEXT,
             is_admin BOOLEAN DEFAULT FALSE,
+            is_anonymous BOOLEAN DEFAULT FALSE,
+            avatar TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    
+    # Create admin user with default credentials (username: admin, password: admin123)
+    admin_password = os.getenv('PASSWORD')
+    admin_password_hash = hashlib.sha256(admin_password.encode()).hexdigest()
+    conn.execute("""
+        INSERT OR IGNORE INTO users (username, password_hash, is_admin, avatar) 
+        VALUES (?, ?, TRUE, '')
+    """, ("admin", admin_password_hash))
     conn.execute("""
         CREATE TABLE IF NOT EXISTS posts (
             id INTEGER PRIMARY KEY,
@@ -102,8 +127,8 @@ def init_db():
     
     # Create default admin users and some sample posts
     conn.execute("""
-        INSERT OR IGNORE INTO users (twitter_id, username, is_admin) 
-        VALUES ('admin1', 'Admin User 1', TRUE), ('admin2', 'Admin User 2', TRUE), ('admin3', 'Admin User 3', TRUE)
+        INSERT OR IGNORE INTO users (username, is_admin, avatar) 
+        VALUES ('Admin User 1', TRUE, ''), ('Admin User 2', TRUE, ''), ('Admin User 3', TRUE, '')
     """)
     
     # Add sample post if no posts exist
@@ -160,10 +185,9 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         
         user_data = {
             "id": user[0],
-            "twitter_id": user[1],
-            "username": user[2],
-            "avatar": user[3],
-            "is_admin": bool(user[4])
+            "username": user[1],
+            "is_admin": bool(user[3]),
+            "is_anonymous": bool(user[4])
         }
         
         # Debug print
@@ -252,39 +276,39 @@ def get_post_with_interactions(post_id: int, user_id: Optional[int] = None):
         "user_disliked": user_disliked
     }
 
+# Models for auth
+class LoginData(BaseModel):
+    username: str
+    password: str
+
+class AnonymousUserCreate(BaseModel):
+    device_id: str
+
 # Health check endpoint
 @app.get("/")
 async def health_check():
     return {"status": "healthy", "message": "Blog API is running"}
 
-# Twitter OAuth (simplified for demo)
-@app.post("/auth/twitter")
-async def twitter_login(twitter_data: dict):
+# Admin login
+@app.post("/auth/login")
+async def admin_login(login_data: LoginData):
     try:
-        print(f"Login attempt with data: {twitter_data}")  # Debug log
-        
-        # Validate required fields
-        if "twitter_id" not in twitter_data or "username" not in twitter_data:
-            raise HTTPException(status_code=400, detail="Missing required fields")
-            
-        print(f"Processing login for user: {twitter_data['username']}, admin: {twitter_data.get('is_admin', False)}")  # Debug log
-        
         conn = sqlite3.connect("blog.db")
         cursor = conn.cursor()
         
-        cursor.execute("SELECT * FROM users WHERE twitter_id = ?", (twitter_data["twitter_id"],))
+        password_hash = hashlib.sha256(login_data.password.encode()).hexdigest()
+        
+        cursor.execute("""
+            SELECT * FROM users 
+            WHERE username = ? AND password_hash = ? AND is_admin = TRUE
+        """, (login_data.username, password_hash))
+        
         user = cursor.fetchone()
         
         if not user:
-            cursor.execute("""
-                INSERT INTO users (twitter_id, username, avatar, is_admin) 
-                VALUES (?, ?, ?, ?)
-            """, (twitter_data["twitter_id"], twitter_data["username"], twitter_data.get("avatar", ""), twitter_data.get("is_admin", False)))
-            user_id = cursor.lastrowid
-            cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
-            user = cursor.fetchone()
-        else:
-            user_id = user[0]
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        
+        user_id = user[0]
         
         # Create session
         token = secrets.token_urlsafe(32)
@@ -296,26 +320,71 @@ async def twitter_login(twitter_data: dict):
         """, (token, user_id, expires_at))
         
         conn.commit()
-        conn.close()
-        
-        user_data = {
-            "id": user[0],
-            "twitter_id": user[1],
-            "username": user[2],
-            "avatar": user[3],
-            "is_admin": bool(user[4])
-        }
-        
-        print(f"Login successful: {user_data}")  # Debug log
         
         return {
             "token": token,
-            "user": user_data
+            "user": {
+                "id": user[0],
+                "username": user[1],
+                "is_admin": bool(user[3])
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Login error: {e}")
+        raise HTTPException(status_code=500, detail="Login failed")
+    finally:
+        conn.close()
+
+# Anonymous user creation/authentication
+@app.post("/auth/anonymous")
+async def create_anonymous_user(user_data: AnonymousUserCreate):
+    try:
+        conn = sqlite3.connect("blog.db")
+        cursor = conn.cursor()
+        
+        # Check if device already has an anonymous user
+        cursor.execute("SELECT * FROM users WHERE username = ? AND is_anonymous = TRUE", (user_data.device_id,))
+        user = cursor.fetchone()
+        
+        if not user:
+            cursor.execute("""
+                INSERT INTO users (username, is_anonymous) 
+                VALUES (?, TRUE)
+            """, (user_data.device_id,))
+            user_id = cursor.lastrowid
+            cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+            user = cursor.fetchone()
+        else:
+            user_id = user[0]
+            
+        # Create session
+        token = secrets.token_urlsafe(32)
+        expires_at = datetime.now() + timedelta(days=30)
+        
+        cursor.execute("""
+            INSERT OR REPLACE INTO sessions (token, user_id, expires_at) 
+            VALUES (?, ?, ?)
+        """, (token, user_id, expires_at))
+        
+        conn.commit()
+        
+        return {
+            "token": token,
+            "user": {
+                "id": user[0],
+                "username": user[1],
+                "is_anonymous": bool(user[4])
+            }
         }
         
     except Exception as e:
-        print(f"Login error: {e}")  # Debug log
-        raise HTTPException(status_code=500, detail="Login failed")
+        print(f"Anonymous user creation error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create anonymous user")
+    finally:
+        conn.close()
 
 # Posts
 @app.get("/posts")
@@ -631,6 +700,9 @@ async def interact_with_post(
             WHERE post_id = ? AND user_id = ? AND type = ?
         """, (post_id, user["id"], action))
         existing_same_action = cursor.fetchone()
+        
+        # Start transaction
+        cursor.execute("BEGIN")
         
         if existing_same_action:
             # User is toggling off the same action - remove it
