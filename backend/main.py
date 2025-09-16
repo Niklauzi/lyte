@@ -32,6 +32,8 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Database
 def init_db():
+    conn = sqlite3.connect("blog.db")
+    
     # Migration: Add updated_at column if it doesn't exist
     try:
         cursor = conn.cursor()
@@ -43,7 +45,7 @@ def init_db():
             conn.commit()
     except Exception as e:
         print(f"Migration error: {e}")
-    conn = sqlite3.connect("blog.db")
+    
     conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY,
@@ -185,6 +187,71 @@ def get_optional_user(credentials: Optional[HTTPAuthorizationCredentials] = Depe
     except:
         return None
 
+# Helper function to get post with user interactions
+def get_post_with_interactions(post_id: int, user_id: Optional[int] = None):
+    """Get a post with all its interaction counts and user-specific data"""
+    conn = sqlite3.connect("blog.db")
+    cursor = conn.cursor()
+    
+    # Get post data with counts
+    cursor.execute("""
+        SELECT 
+            p.id,
+            p.title,
+            p.content,
+            p.images,
+            p.created_at,
+            p.updated_at,
+            u.username,
+            u.avatar,
+            (SELECT COUNT(*) FROM interactions i WHERE i.post_id = p.id AND i.type = 'like') as likes,
+            (SELECT COUNT(*) FROM interactions i WHERE i.post_id = p.id AND i.type = 'dislike') as dislikes,
+            (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) as comment_count
+        FROM posts p
+        JOIN users u ON p.author_id = u.id
+        WHERE p.id = ?
+    """, (post_id,))
+    
+    post_data = cursor.fetchone()
+    
+    if not post_data:
+        conn.close()
+        return None
+    
+    # Get user-specific interactions if user is provided
+    user_liked = False
+    user_disliked = False
+    
+    if user_id:
+        cursor.execute("""
+            SELECT type FROM interactions 
+            WHERE post_id = ? AND user_id = ?
+        """, (post_id, user_id))
+        user_interactions = cursor.fetchall()
+        
+        for interaction in user_interactions:
+            if interaction[0] == 'like':
+                user_liked = True
+            elif interaction[0] == 'dislike':
+                user_disliked = True
+    
+    conn.close()
+    
+    return {
+        "id": post_data[0],
+        "title": post_data[1],
+        "content": post_data[2],
+        "images": json.loads(post_data[3]) if post_data[3] else [],
+        "created_at": post_data[4],
+        "updated_at": post_data[5],
+        "author": {"username": post_data[6], "avatar": post_data[7]},
+        "likes": post_data[8],
+        "dislikes": post_data[9],
+        "comment_count": post_data[10],
+        "user_liked": user_liked,
+        "user_disliked": user_disliked
+    }
+
 # Health check endpoint
 @app.get("/")
 async def health_check():
@@ -257,33 +324,64 @@ async def get_posts(user: dict = Depends(get_optional_user)):
         conn = sqlite3.connect("blog.db")
         cursor = conn.cursor()
         
+        current_user_id = user["id"] if user else None
+        
+        # Get all posts with their interaction counts
         cursor.execute("""
-            SELECT p.*, u.username, u.avatar,
-                   COUNT(CASE WHEN i.type = 'like' THEN 1 END) as likes,
-                   COUNT(CASE WHEN i.type = 'dislike' THEN 1 END) as dislikes,
-                   COUNT(c.id) as comment_count
+            SELECT 
+                p.id,
+                p.title,
+                p.content,
+                p.images,
+                p.created_at,
+                p.updated_at,
+                u.username,
+                u.avatar,
+                (SELECT COUNT(*) FROM interactions i WHERE i.post_id = p.id AND i.type = 'like') as likes,
+                (SELECT COUNT(*) FROM interactions i WHERE i.post_id = p.id AND i.type = 'dislike') as dislikes,
+                (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) as comment_count
             FROM posts p
             JOIN users u ON p.author_id = u.id
-            LEFT JOIN interactions i ON p.id = i.post_id
-            LEFT JOIN comments c ON p.id = c.post_id
-            GROUP BY p.id
             ORDER BY p.created_at DESC
         """)
-        posts = cursor.fetchall()
+        posts_data = cursor.fetchall()
+        
+        # Get user-specific interactions if user is logged in
+        user_interactions = {}
+        if current_user_id:
+            cursor.execute("""
+                SELECT post_id, type FROM interactions 
+                WHERE user_id = ?
+            """, (current_user_id,))
+            for post_id, interaction_type in cursor.fetchall():
+                if post_id not in user_interactions:
+                    user_interactions[post_id] = {'like': False, 'dislike': False}
+                user_interactions[post_id][interaction_type] = True
+        
         conn.close()
         
-        return [{
-            "id": post[0],
-            "title": post[1],
-            "content": post[2],
-            "images": json.loads(post[3]) if post[3] else [],
-            "author": {"username": post[6], "avatar": post[7]},
-            "created_at": post[4],
-            "updated_at": post[5],
-            "likes": post[8],
-            "dislikes": post[9],
-            "comment_count": post[10]
-        } for post in posts]
+        # Format the response
+        posts = []
+        for post_data in posts_data:
+            post_id = post_data[0]
+            user_likes = user_interactions.get(post_id, {'like': False, 'dislike': False})
+            
+            posts.append({
+                "id": post_data[0],
+                "title": post_data[1],
+                "content": post_data[2],
+                "images": json.loads(post_data[3]) if post_data[3] else [],
+                "created_at": post_data[4],
+                "updated_at": post_data[5],
+                "author": {"username": post_data[6], "avatar": post_data[7]},
+                "likes": post_data[8],
+                "dislikes": post_data[9],
+                "comment_count": post_data[10],
+                "user_liked": user_likes['like'],
+                "user_disliked": user_likes['dislike']
+            })
+        
+        return posts
         
     except Exception as e:
         print(f"Error getting posts: {e}")
@@ -394,31 +492,14 @@ async def update_post(
         """, (title, content, json.dumps(all_images), post_id))
         
         conn.commit()
-        
-        # Get updated post data
-        cursor.execute("""
-            SELECT p.*, u.username, u.avatar
-            FROM posts p
-            JOIN users u ON p.author_id = u.id
-            WHERE p.id = ?
-        """, (post_id,))
-        updated_post = cursor.fetchone()
-        
         conn.close()
         
+        # Get updated post data using helper function
+        updated_post = get_post_with_interactions(post_id, user["id"])
+        
         if updated_post:
-            result = {
-                "id": updated_post[0],
-                "title": updated_post[1],
-                "content": updated_post[2],
-                "images": json.loads(updated_post[3]) if updated_post[3] else [],
-                "author": {"username": updated_post[6], "avatar": updated_post[7]},
-                "created_at": updated_post[4],
-                "updated_at": updated_post[5]
-            }
-            
             print(f"Post updated successfully: {title}")  # Debug log
-            return result
+            return updated_post
         else:
             raise HTTPException(status_code=500, detail="Failed to retrieve updated post")
         
@@ -528,7 +609,7 @@ async def create_comment(
         print(f"Error creating comment: {e}")
         raise HTTPException(status_code=500, detail="Failed to create comment")
 
-# Interactions
+# Interactions - FIXED VERSION
 @app.post("/posts/{post_id}/{action}")
 async def interact_with_post(
     post_id: int, 
@@ -542,22 +623,48 @@ async def interact_with_post(
         conn = sqlite3.connect("blog.db")
         cursor = conn.cursor()
         
-        # Remove existing interaction
-        cursor.execute("""
-            DELETE FROM interactions 
-            WHERE post_id = ? AND user_id = ?
-        """, (post_id, user["id"]))
+        print(f"User {user['id']} attempting to {action} post {post_id}")  # Debug log
         
-        # Add new interaction
+        # Check if user already has this specific interaction
         cursor.execute("""
-            INSERT INTO interactions (post_id, user_id, type)
-            VALUES (?, ?, ?)
+            SELECT type FROM interactions 
+            WHERE post_id = ? AND user_id = ? AND type = ?
         """, (post_id, user["id"], action))
+        existing_same_action = cursor.fetchone()
         
+        if existing_same_action:
+            # User is toggling off the same action - remove it
+            cursor.execute("""
+                DELETE FROM interactions 
+                WHERE post_id = ? AND user_id = ? AND type = ?
+            """, (post_id, user["id"], action))
+            print(f"Removed {action} from user {user['id']} on post {post_id}")
+        else:
+            # Remove any opposite interaction first
+            opposite_action = "dislike" if action == "like" else "like"
+            cursor.execute("""
+                DELETE FROM interactions 
+                WHERE post_id = ? AND user_id = ? AND type = ?
+            """, (post_id, user["id"], opposite_action))
+            
+            # Add the new interaction
+            cursor.execute("""
+                INSERT INTO interactions (post_id, user_id, type)
+                VALUES (?, ?, ?)
+            """, (post_id, user["id"], action))
+            print(f"Added {action} from user {user['id']} on post {post_id}")
+
         conn.commit()
         conn.close()
         
-        return {"message": f"Post {action}d successfully"}
+        # Get updated post data using helper function
+        updated_post = get_post_with_interactions(post_id, user["id"])
+        
+        if updated_post:
+            print(f"Returning updated post: likes={updated_post['likes']}, dislikes={updated_post['dislikes']}, user_liked={updated_post['user_liked']}, user_disliked={updated_post['user_disliked']}")
+            return updated_post
+        else:
+            raise HTTPException(status_code=404, detail="Post not found")
         
     except Exception as e:
         print(f"Error with interaction: {e}")
@@ -571,14 +678,11 @@ async def predict_engagement(post_id: int):
         cursor = conn.cursor()
         cursor.execute("""
             SELECT LENGTH(content), 
-                   COUNT(CASE WHEN i.type = 'like' THEN 1 END) as likes,
-                   COUNT(c.id) as comments
+                   (SELECT COUNT(*) FROM interactions i WHERE i.post_id = ? AND i.type = 'like') as likes,
+                   (SELECT COUNT(*) FROM comments c WHERE c.post_id = ?) as comments
             FROM posts p
-            LEFT JOIN interactions i ON p.id = i.post_id
-            LEFT JOIN comments c ON p.id = c.post_id
             WHERE p.id = ?
-            GROUP BY p.id
-        """, (post_id,))
+        """, (post_id, post_id, post_id))
         data = cursor.fetchone()
         conn.close()
         
@@ -635,6 +739,17 @@ async def debug_users():
     users = cursor.fetchall()
     conn.close()
     return {"users": users}
+
+@app.get("/debug/interactions/{post_id}")
+async def debug_interactions(post_id: int):
+    conn = sqlite3.connect("blog.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM interactions WHERE post_id = ?", (post_id,))
+    interactions = cursor.fetchall()
+    cursor.execute("SELECT * FROM comments WHERE post_id = ?", (post_id,))
+    comments = cursor.fetchall()
+    conn.close()
+    return {"interactions": interactions, "comments": comments}
 
 if __name__ == "__main__":
     import uvicorn

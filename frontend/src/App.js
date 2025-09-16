@@ -514,21 +514,21 @@ function PostDetailModal({ post, isOpen, onClose, onInteract, onComment, onPostU
                 <div className="d-flex align-items-center gap-4">
                   <button
                     onClick={() => handleInteract('like')}
-                    className="btn btn-link p-0 text-danger d-flex align-items-center gap-2"
+                    className={`btn btn-link p-0 d-flex align-items-center gap-2 ${post.user_liked ? 'text-danger' : 'text-muted'}`}
                     disabled={!user}
                     style={{textDecoration: 'none'}}
                   >
-                    <Heart size={20} />
+                    <Heart size={20} fill={post.user_liked ? "currentColor" : "none"} />
                     <span>{post.likes || 0}</span>
                   </button>
                   
                   <button
                     onClick={() => handleInteract('dislike')}
-                    className="btn btn-link p-0 text-muted d-flex align-items-center gap-2"
+                    className={`btn btn-link p-0 d-flex align-items-center gap-2 ${post.user_disliked ? 'text-danger' : 'text-muted'}`}
                     disabled={!user}
                     style={{textDecoration: 'none'}}
                   >
-                    <ThumbsDown size={20} />
+                    <ThumbsDown size={20} fill={post.user_disliked ? "currentColor" : "none"} />
                     <span>{post.dislikes || 0}</span>
                   </button>
                   
@@ -902,11 +902,11 @@ function PostCard({ post, onInteract, onComment, onPostClick, onPostDelete }) {
                     e.stopPropagation();
                     handleInteract('like');
                   }}
-                  className="btn btn-link p-0 text-danger d-flex align-items-center gap-2 no-click"
+                  className={`btn btn-link p-0 d-flex align-items-center gap-2 no-click ${post.user_liked ? 'text-danger' : 'text-muted'}`}
                   disabled={!user}
                   style={{textDecoration: 'none'}}
                 >
-                  <Heart size={20} />
+                  <Heart size={20} fill={post.user_liked ? "currentColor" : "none"} />
                   <span>{post.likes || 0}</span>
                 </button>
                 
@@ -915,11 +915,11 @@ function PostCard({ post, onInteract, onComment, onPostClick, onPostDelete }) {
                     e.stopPropagation();
                     handleInteract('dislike');
                   }}
-                  className="btn btn-link p-0 text-muted d-flex align-items-center gap-2 no-click"
+                  className={`btn btn-link p-0 d-flex align-items-center gap-2 no-click ${post.user_disliked ? 'text-danger' : 'text-muted'}`}
                   disabled={!user}
                   style={{textDecoration: 'none'}}
                 >
-                  <ThumbsDown size={20} />
+                  <ThumbsDown size={20} fill={post.user_disliked ? "currentColor" : "none"} />
                   <span>{post.dislikes || 0}</span>
                 </button>
                 
@@ -1283,13 +1283,12 @@ function BlogApp() {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` }
       });
-      
       if (res.ok) {
-        loadPosts();
+        const updatedPost = await res.json();
+        setPosts((prevPosts) => prevPosts.map(p => p.id === updatedPost.id ? updatedPost : p));
       }
     } catch (error) {
       console.error('Error with interaction:', error);
-      loadPosts();
     }
   };
 
